@@ -8,7 +8,7 @@ e.g.
 
 `python3 optimize_llamacpp_ngl.py 8192 /path/to/llama.cpp/main /path/to/model.gguf 40`
 
-This script is written for nvidia cards. If you have AMD or Intel cards and would like to add support, I welcome PRs. I have tested it on a multiple nvidia GPU machine, but not with heterogeneous models - I do think that should work fine, though.
+This script is written for nvidia cards. If you have AMD or Intel cards and would like to add support, I welcome PRs. I have tested it on a multiple nvidia GPU machine, but not with heterogeneous cards - I do think that should work fine, though.
 
 ## TODO
 * Should be able to use the report `--split-mode layer` gives on CUDA buffer sizes to make better guesses than blind binary search
