@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 
@@ -54,13 +55,25 @@ model_path = sys.argv[3]
 ngl_guess = 30
 if len(sys.argv) >= 5:
   ngl_guess = int(sys.argv[4])
+if not os.path.isfile(llama_main_path):
+  print(f'file does not exist: {llama_main_path}')
+  exit(1)
+main_help_process = subprocess.Popen(f'{llama_main_path} --help', stdout=subprocess.PIPE, shell=True)
+main_help_stdout, main_help_stderr = main_help_process.communicate()
+mh = main_help_stdout.decode()
+if not ('--split-mode' in mh and '--reverse-prompt' in mh):
+  print(f'this file does not appear to be a working llama.cpp "main" executable: {llama_main_path}')
+  exit(1)
+if not os.path.isfile(model_path):
+  print(f'file does not exist: {model_path}')
+  exit(1)
 
 pcie_lanes_per_gpu = nvidia_smi_query_quantity('pcie.link.width.current')
 vram_per_gpu = nvidia_smi_query_quantity('memory.total')
 
-process = subprocess.Popen('nvidia-smi --query-gpu=name --format=csv,noheader', stdout=subprocess.PIPE, shell=True)
-stdout, stderr = process.communicate()
-gpu_names = [s for s in stdout.decode().split('\n') if s != '']
+nvidia_smi_process = subprocess.Popen('nvidia-smi --query-gpu=name --format=csv,noheader', stdout=subprocess.PIPE, shell=True)
+nv_stdout, nv_stderr = nvidia_smi_process.communicate()
+gpu_names = [s for s in nv_stdout.decode().split('\n') if s != '']
 vram_bandwidth_table = { 'NVIDIA GeForce RTX 4090': 1008,
                          'NVIDIA GeForce RTX 4080': 737,
                          'NVIDIA GeForce RTX 4070 Ti': 672,
