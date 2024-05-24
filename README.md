@@ -2,15 +2,13 @@ For the time being, llama.cpp can't automatically determine its `-ngl` (number o
 
 There should be no dependencies - just a working llama.cpp main compiled for CUDA. Run as:
 
-`python3 optimize_llamacpp_ngl.py desired_context /path/to/llama.cpp/main /path/to/model.gguf [ngl_guess]`
+`python3 optimize_llamacpp_ngl.py desired_context /path/to/llama.cpp/main /path/to/model.gguf`
 
 e.g.
 
-`python3 optimize_llamacpp_ngl.py 8192 /path/to/llama.cpp/main /path/to/model.gguf 40`
+`python3 optimize_llamacpp_ngl.py 8192 /path/to/llama.cpp/main /path/to/model.gguf`
 
 This script is written for nvidia cards. If you have AMD or Intel cards and would like to add support, I welcome PRs. I have tested it on a multiple nvidia GPU machine, but not with heterogeneous cards - I do think that should work fine, though.
 
 ## TODO
-* Should be able to use the report `--split-mode layer` gives on CUDA buffer sizes to make better guesses than blind binary search
-* Tweaking `--tensor-split` can sometimes fit an extra layer or two
 * Need to confirm whether `--split-mode layer` fitting all layers always guarantees `--split-mode row` is possible
