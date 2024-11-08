@@ -60,8 +60,9 @@ def nvidia_smi_query_quantity(to_query):
 
 
 if len(sys.argv) < 4 or not sys.argv[1].isdigit():
-  print(f'Usage: python3 {sys.argv[0]} desired_context /path/to/llama.cpp/main /path/to/model.gguf')
-  print(f'\ne.g.: python3 {sys.argv[0]} 8192 ~/llama.cpp/main ~/models/model.gguf')
+  print(f'Usage: python3 {sys.argv[0]} desired_context /path/to/llama.cpp/llama-cli /path/to/model.gguf [model_size_in_MiB]')
+  print(f'\ne.g.: python3 {sys.argv[0]} 8192 ~/llama.cpp/bin/llama-cli ~/models/Largestral-2407-Q4KS-00001-of-00002.gguf 66348')
+  print('the optional model_size_in_MiB argument is needed when the model is split over multiple .gguf files.')
   exit(1)
 desired_context = int(sys.argv[1])
 llama_main_path = sys.argv[2]
@@ -73,7 +74,7 @@ main_help_process = subprocess.Popen(f'{llama_main_path} --help', stdout=subproc
 main_help_stdout, main_help_stderr = main_help_process.communicate()
 mh = main_help_stdout.decode()
 if not ('--split-mode' in mh and '--reverse-prompt' in mh):
-  print(f'this file does not appear to be a working llama.cpp "main" executable: {llama_main_path}')
+  print(f'this file does not appear to be a working llama.cpp "llama-cli" executable: {llama_main_path}')
   exit(1)
 if not os.path.isfile(model_path):
   print(f'file does not exist: {model_path}')
@@ -135,6 +136,9 @@ with open(model_path, 'rb') as model_file:
 
 # initial guess, hopefully we can mostly skip binary search
 model_size_MiB = 1 + os.path.getsize(model_path) // (1024 * 1024)
+#HACK for case when model is split across multiple .ggufs
+if len(sys.argv) > 4:
+  model_size_MiB = int(sys.argv[4])
 MiB_per_layer = 1 + model_size_MiB // model_layers
 print(f'model has {model_layers} layers, file size {model_size_MiB}MiB, model_is_MoE: {model_is_MoE}')
 # we can be pretty sure that if x * mem_per_layer > VRAM, we ain't fittin x layers in VRAM
@@ -143,6 +147,7 @@ ngl_upperlimit = min(model_layers, sum(vram_per_gpu) // MiB_per_layer)
 total_overhead_guess = 11000 if model_size_MiB > 60000 else (5000 if model_size_MiB > 30000 else 2000)
 ngl_lowerlimit = min(model_layers, (sum(vram_per_gpu) - total_overhead_guess) // MiB_per_layer)
 
+print(f'model layers: {model_layers}')
 print(f'binary search bounds: low {ngl_lowerlimit} high {ngl_upperlimit+1}')
 max_ngl_possible, found, tensor_split = binary_search_most_ngl_possible(
   ngl_lowerlimit, ngl_upperlimit+1, llama_main_path,
