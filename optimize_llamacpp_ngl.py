@@ -1,8 +1,29 @@
 import os
+import re
 import struct
 import subprocess
 import sys
 
+non_model_buffers = [] # context and compute buffers
+
+def check_cuda_buffer_sizes(the_stderr):
+  global non_model_buffers
+  if non_model_buffers[0] > 0:
+    return
+  pattern = r'CUDA(\d+) KV buffer size =\s*([\d.]+) MiB'
+  matches = re.findall(pattern, text)
+  pattern = r'CUDA(\d+) compute buffer size =\s*([\d.]+) MiB'
+  matches_compute = re.findall(pattern, text)
+  if len(matches) == len(non_model_buffers) and len(matches_compute) == len(non_model_buffers):
+    for i, size_mib in matches:
+      non_model_buffers[i] = size_mib
+    for i, size_mib in matches_compute:
+      non_model_buffers[i] += size_mib
+
+def non_model_bufsize(cuda_index, main_gpu_index):
+  if non_model_buffers[cuda_index] > 0:
+    return non_model_buffers[cuda_index]
+  return 1500 if cuda_index == main_gpu_index else 1000
 
 def try_llama_main(ngl, llama_main_path, model_path, desired_context,
                    split_mode, main_gpu, tensor_split):
@@ -10,17 +31,16 @@ def try_llama_main(ngl, llama_main_path, model_path, desired_context,
   cmd = f'{llama_main_path} -m {model_path} -c {desired_context} --split-mode {split_mode}{tensor_split} --main-gpu {main_gpu} --flash-attn -t 4 -ngl {ngl} -n 1 --prompt "if this sentence is in stdout then our ngl was ok"'
   process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
   stdout, stderr = process.communicate()
+  check_cuda_buffer_sizes(stderr.decode())
+
   return 'if this sentence is in stdout then our ngl was ok' in stdout.decode()
 
 
 def best_tensor_split(vram_per_gpu, MiB_per_layer, ngl):
   vram_left = vram_per_gpu[:]
   remaining_layers = ngl
-  # HACK these overhead estimates are very rough guesses, optimized for 8x22B.
-  # too conservative for smaller models and GPUs? TODO use CUDA0etc buffer size from initial guess
   for i in range(0, len(vram_left)):
-    vram_left[i] -= 500
-  vram_left[main_gpu_ind] -= 1000
+    vram_left[i] -= non_model_bufsize(i, main_gpu_ind)
   layers = [0] * len(vram_left)
   while remaining_layers > 0:
     target_ind = vram_left.index(max(vram_left))
@@ -60,9 +80,8 @@ def nvidia_smi_query_quantity(to_query):
 
 
 if len(sys.argv) < 4 or not sys.argv[1].isdigit():
-  print(f'Usage: python3 {sys.argv[0]} desired_context /path/to/llama.cpp/llama-cli /path/to/model.gguf [model_size_in_MiB]')
-  print(f'\ne.g.: python3 {sys.argv[0]} 8192 ~/llama.cpp/bin/llama-cli ~/models/Largestral-2407-Q4KS-00001-of-00002.gguf 66348')
-  print('the optional model_size_in_MiB argument is needed when the model is split over multiple .gguf files.')
+  print(f'Usage: python3 {sys.argv[0]} desired_context /path/to/llama.cpp/llama-cli /path/to/model.gguf')
+  print(f'\ne.g.: python3 {sys.argv[0]} 8192 ~/llama.cpp/bin/llama-cli ~/models/Largestral-2407-Q4KS-00001-of-00002.gguf')
   exit(1)
 desired_context = int(sys.argv[1])
 llama_main_path = sys.argv[2]
@@ -119,6 +138,7 @@ for gpu_ind in best_bw_inds:
   if pcie_lanes_per_gpu[gpu_ind] > best_pcie:
     main_gpu_ind = gpu_ind
 
+non_model_buffers = [0 for x in range(len(gpu_names))]
 
 model_layers = 0
 model_is_MoE = False
@@ -134,20 +154,31 @@ with open(model_path, 'rb') as model_file:
     expert_count = struct.unpack('<i', data[ind_expert_count+17:ind_expert_count+21])[0]
     model_is_MoE = (expert_count > 1)
 
-# initial guess, hopefully we can mostly skip binary search
-model_size_MiB = 1 + os.path.getsize(model_path) // (1024 * 1024)
-#HACK for case when model is split across multiple .ggufs
-if len(sys.argv) > 4:
-  model_size_MiB = int(sys.argv[4])
+# Determine the total model size in MiB
+model_index_index = model_path.find('00001-of-')
+if model_index_index >= 0:
+  num_files = int(model_path[model_index_index + 9 : model_index_index + 14])
+  filepaths = [model_path[:model_index_index] + f"{i:05d}-of-{num_files:05d}.gguf" for i in range(1, num_files + 1)]
+  model_size_MiB = sum(1 + os.path.getsize(f) // (1024 * 1024) for f in filepaths)
+else:
+  model_size_MiB = 1 + os.path.getsize(model_path) // (1024 * 1024)
+
 MiB_per_layer = 1 + model_size_MiB // model_layers
 print(f'model has {model_layers} layers, file size {model_size_MiB}MiB, model_is_MoE: {model_is_MoE}')
 # we can be pretty sure that if x * mem_per_layer > VRAM, we ain't fittin x layers in VRAM
+
+# initial guess, hopefully we can mostly skip binary search
 ngl_upperlimit = min(model_layers, sum(vram_per_gpu) // MiB_per_layer)
-# HACK very crude estimates based on observation
 total_overhead_guess = 11000 if model_size_MiB > 60000 else (5000 if model_size_MiB > 30000 else 2000)
 ngl_lowerlimit = min(model_layers, (sum(vram_per_gpu) - total_overhead_guess) // MiB_per_layer)
 
 print(f'model layers: {model_layers}')
+
+# a sanity check, but also a warmup to load the context and compute buffer sizes using check_cuda_buffer_sizes()
+if not try_llama_main(0, llama_main_path, model_path, desired_context, 'layer', main_gpu_ind, ' '):
+  print("Not even -ngl 0 works. It looks like you can't run this model. Sorry.")
+  exit(1)
+
 print(f'binary search bounds: low {ngl_lowerlimit} high {ngl_upperlimit+1}')
 max_ngl_possible, found, tensor_split = binary_search_most_ngl_possible(
   ngl_lowerlimit, ngl_upperlimit+1, llama_main_path,
@@ -162,5 +193,4 @@ if not found:
     exit(1)
 
 split_mode = 'layer' if model_is_MoE or max_ngl_possible < model_layers else 'row'
-# TODO do we need to confirm --split-mode row can run?
 print(f'\nRun llama.cpp with these arguments:\n-m {model_path} -c {desired_context} --split-mode {split_mode}{tensor_split} --main-gpu {main_gpu_ind} --flash-attn -t 4 -ngl {max_ngl_possible}')
